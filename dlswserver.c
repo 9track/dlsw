@@ -40,6 +40,52 @@
 #define TEST_CIRC_REQ   0x7A                            /* Test Circuit Request */
 #define TEST_CIRC_RSP   0x7B                            /* Test Circuit Response */
 
+#if 0
+/* States */
+
+#define CIRCUIT_ESTABLISHED
+#define CIRCUIT_PENDING
+#define CIRCUIT_RESTART
+#define CIRCUIT_START
+#define CONNECTED
+#define CONNECT_PENDING
+#define CONTACT_PENDING
+#define DISCONNECTED
+#define DISCONNECT_PENDING
+#define HALT_PENDING
+#define HALT_PENDING_NOACK
+#define RESTART_PENDING
+#define RESOLVE_PENDING
+
+/* Events */
+
+#define DLC_CONTACTED
+//#define DLC_DGRM
+#define DLC_ERROR
+#define DLC_INFO
+#define DLC_DL_HALTED
+#define DLC_DL_STARTED
+#define DLC_RESET
+#define DLC_RESOLVE_C
+#define DLC_RESOLVED
+#define DLC_XID
+#define XPORT_FAILURE
+#define CS_TIMER_EXP
+
+/* Actions */
+
+#define DLC_CONTACT
+//#define DLC_DGRM **
+#define DLC_ENTER_BUSY
+#define DLC_EXIT_BUSY
+#define DLC_HALT_DL
+#define DLC_INFO **
+#define DLC_RESOLVE
+#define DLC_RESOLVE_R
+#define DLC_START_DL
+#define DLC_XID **
+#endif
+
 /* SSP flags */
 
 #define SSPex           0x80                            /* explorer message */
@@ -87,6 +133,18 @@
 #define HDR_TDLC        0x3C                            /* Target Data Link Correlator */
 #define HDR_TTID        0x40                            /* Target Transport ID */
 
+/* Flow control fields */
+
+#define FCB_FCI         0x80                            /* Flow control indicator */
+#define FCB_FCA         0x40                            /* Flow control acknowledge */
+#define FCB_FCO         0x07                            /* Flow control operator */
+
+#define FCO_RPT         0x00                            /* Repeat window operator */
+#define FCO_INC         0x01                            /* Increment window operator */
+#define FCO_DEC         0x02                            /* Decrement window operator */
+#define FCO_RST         0x03                            /* Reset window operator */
+#define FCO_HLV         0x04                            /* Halve window operator */
+
 /* Capabilities Exchange Subfields */
 
 #define CAP_VID         0x81                            /* Vendor ID */
@@ -121,6 +179,12 @@ typedef struct {
     int readfd;                                         /* read socket */
     int writefd;                                        /* write socket */
     int high_ip;                                        /* local host has higher ip */
+    int fca_owed;                                       /* flow control ack owed */
+    int init_window;
+    int window;
+    int granted;
+    int flow_control;
+    int actlu;
     uint32_t dlc;                                       /* data link correlator */
     uint32_t dlc_pid;                                   /* DLC port id */
 } PEER_t;
@@ -138,6 +202,8 @@ void send_capabilities(PEER_t *peer, unsigned char *buf)
 {
     unsigned int off = LEN_CTRL + 4;
     int n;                                              /* message byte size */
+
+    peer->flow_control = 0;
 
     buf[off++] = 0x05;                                  /* Vendor ID */
     buf[off++] = CAP_VID;
@@ -235,6 +301,10 @@ void process_capabilities(PEER_t *peer, unsigned char *buf)
 
             case CAP_IPW:                               /* Initial Pacing Window */
                 printf("CAP: Initial Pacing Window\r\n");
+                peer->init_window = ntohs(GET16(buf, off));
+                peer->window = peer->init_window;
+                peer->granted = 0;
+                peer->fca_owed = 0;
                 break;
 
             case CAP_VERS:                              /* Version String */
@@ -309,11 +379,113 @@ void process_capabilities(PEER_t *peer, unsigned char *buf)
     }
 }
 
+#if 0
+void process_disconnected_event()
+{
+    switch (event)
+    {
+        case CANUREACH_cs:
+            break;
+    }
+}
+
+void process_event()
+{
+    switch (state)
+    {
+        case DISCONNECTED:
+            process_disconnected_event();
+            break;
+
+        case RESOLVE_PENDING:
+}
+
+void process_canureach_ex()
+{
+}
+
+void process_canureach_cs()
+{
+    switch (state)
+    {
+        case DISCONNECTED:
+            state = RESOLVE_PENDING;
+            if (ncp_started)
+            {
+                send_icanreach_cs();
+                state = CIRCUIT_PENDING;
+            }
+            break;
+
+        case CIRCUIT_START:
+            break;
+
+        default:
+            // Invalid?
+            break;
+    }
+}
+#endif
+
+void process_flow_control(PEER_t *peer, unsigned char *buf)
+{
+    if (buf[HDR_FCB] & FCB_FCI)
+    {
+        switch (buf[HDR_FCB] & FCB_FCO)
+        {
+            case FCO_RPT:
+                peer->granted += peer->window;
+                break;
+
+            case FCO_INC:
+                peer->window++;
+                peer->granted += peer->window;
+                break;
+
+            case FCO_DEC:
+                peer->window--;
+                peer->granted += peer->window;
+                break;
+
+            case FCO_RST:
+                peer->window = 0;
+                peer->granted = 0;
+                break;
+
+            case FCO_HLV:
+                if (peer->window > 1)
+                {
+                    peer->window = peer->window / 2;
+                }
+                peer->granted += peer->window;
+                break;
+        }
+    }
+    if (buf[HDR_FCB] & FCB_FCA)
+    {
+        peer->fca_owed = 0;
+    }
+    if (peer->fca_owed)
+    {
+        buf[HDR_FCB] = 0;
+    }
+    else
+    {
+        buf[HDR_FCB] = FCB_FCI | FCO_RPT;
+        peer->fca_owed = 1;
+    }
+}
+
 void process_packet(PEER_t *peer, unsigned char *buf)
 {
     uint8_t msg_type = buf[HDR_MTYP];
     uint16_t msg_len = ntohs(GET16(buf, HDR_MLEN));
     int n;
+
+    if (peer->flow_control)
+    {
+        process_flow_control(peer, buf);
+    }
 
     switch (msg_type)
     {
@@ -338,6 +510,7 @@ void process_packet(PEER_t *peer, unsigned char *buf)
 
         case REACH_ACK:
             printf("<-- REACH_ACK\r\n");
+            peer->flow_control = 1;
 #if 0
             PUT16(buf, HDR_MLEN, 0);
             buf[HDR_MTYP] = CONTACT;
@@ -408,8 +581,72 @@ void process_packet(PEER_t *peer, unsigned char *buf)
             printf("--> CONTACTED\r\n");
             break;
 
+        case CONTACTED:
+            peer->actlu = 0;
+            PUT16(buf, HDR_MLEN, htons(18));
+            buf[HDR_HLEN] = LEN_INFO;
+            buf[HDR_MTYP] = INFOFRAME;
+            buf[HDR_DIR] = DIR_ORG;
+            peer->dlc = GET32(buf, HDR_ODLC);
+            peer->dlc_pid = GET32(buf, HDR_ODPID);
+            PUT32(buf, HDR_RDLC, GET32(buf, HDR_ODLC));
+            PUT32(buf, HDR_RDPID, GET32(buf, HDR_ODPID));
+            buf[LEN_INFO+0] = 0x2C;                     /* FID2 */
+            buf[LEN_INFO+1] = 0x00;
+            buf[LEN_INFO+2] = 0x00;                     /* DAF */
+            buf[LEN_INFO+3] = 0x08;                     /* OAF */
+            buf[LEN_INFO+4] = 0x00;                     /* SNF */
+            buf[LEN_INFO+5] = 0x01;                     /* SNF */
+
+            buf[LEN_INFO+6] = 0x6B;                     /* request header */
+            buf[LEN_INFO+7] = 0x80;
+            buf[LEN_INFO+8] = 0x00;
+
+            buf[LEN_INFO+9] = 0x11;                     /* ACTPU */
+            buf[LEN_INFO+10] = 0x01;                    /* cold activation */
+            buf[LEN_INFO+11] = 0x01;                    /* FM, TS profile */
+            buf[LEN_INFO+12] = 0x05;                    /* PU type of SSCP */
+            buf[LEN_INFO+13] = 0x12;                    /* SSCP id */
+            buf[LEN_INFO+14] = 0x34;
+            buf[LEN_INFO+15] = 0x56;
+            buf[LEN_INFO+16] = 0x78;
+            buf[LEN_INFO+17] = 0x9A;
+            n = write(peer->writefd, buf, LEN_INFO+18);
+            if (n < 0)
+                error("ERROR writing to socket");
+            printf("--> ACTPU\r\n");
+            break;
+
         case INFOFRAME:
             printf("<-- INFOFRAME\r\n");
+            if (!peer->actlu)
+            {
+                peer->actlu = 1;
+                PUT16(buf, HDR_MLEN, htons(12));
+                buf[HDR_HLEN] = LEN_INFO;
+                buf[HDR_MTYP] = INFOFRAME;
+                buf[HDR_DIR] = DIR_ORG;
+                PUT32(buf, HDR_RDLC, peer->dlc);
+                PUT32(buf, HDR_RDPID, peer->dlc_pid);
+                buf[LEN_INFO+0] = 0x2C;                     /* FID2 */
+                buf[LEN_INFO+1] = 0x00;
+                buf[LEN_INFO+2] = 0x24;                     /* DAF */
+                buf[LEN_INFO+3] = 0x08;                     /* OAF */
+                buf[LEN_INFO+4] = 0x00;                     /* SNF */
+                buf[LEN_INFO+5] = 0x02;                     /* SNF */
+
+                buf[LEN_INFO+6] = 0x6B;                     /* request header */
+                buf[LEN_INFO+7] = 0x80;
+                buf[LEN_INFO+8] = 0x00;
+
+                buf[LEN_INFO+9] = 0x0D;                     /* ACTLU */
+                buf[LEN_INFO+10] = 0x01;                    /* cold activation */
+                buf[LEN_INFO+11] = 0x01;                    /* FM, TS profile */
+                n = write(peer->writefd, buf, LEN_INFO+12);
+                if (n < 0)
+                    error("ERROR writing to socket");
+                printf("--> ACTLU\r\n");
+            }
             break;
 
         case CAP_EXCHANGE:                              /* Capabilities Exchange */
@@ -480,27 +717,6 @@ int main(int argc, char **argv)
     if (listen(serverfd, 1) < 0)
         error("ERROR on listen");
 
-#if 0
-    /* connect to the server */
-    peer.writefd = socket(AF_INET, SOCK_STREAM, 0);
-    if (peer.writefd < 0) 
-        error("ERROR opening socket");
-
-    serveraddr.sin_family = AF_INET;
-    serveraddr.sin_addr.s_addr = htonl(0xc0a8005f);
-    serveraddr.sin_port = htons((unsigned short)DLSW_PORT);
-
-    /* connect: create a connection with the server */
-    if (connect(peer.writefd, (struct sockaddr *) &serveraddr, sizeof(serveraddr)) < 0) 
-        error("ERROR connecting");
-
-    /* 
-     * send capabilities to the server
-     */
-    bzero(buf, BUFSIZE);
-    send_capabilities(&peer, buf);
-#endif
-
     /* 
      * accept: wait for a connection request 
      */
@@ -539,7 +755,6 @@ int main(int argc, char **argv)
     else
         peer.high_ip = 0;
 
-//#if 0
     /* connect to the server */
     peer.writefd = socket(AF_INET, SOCK_STREAM, 0);
     if (peer.writefd < 0) 
@@ -558,7 +773,6 @@ int main(int argc, char **argv)
      */
     bzero(buf, BUFSIZE);
     send_capabilities(&peer, buf);
-//#endif
 
     while (1)
     {
