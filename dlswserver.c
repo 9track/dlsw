@@ -1,7 +1,7 @@
 /* Program to demonstrate the DLSw protocol (RFC 1795) for routing SNA
    messages over a TCP/IP network
 
-   Copyright (c) 2020, Matt Burke
+   Copyright (c) 2020-2021, Matt Burke
 
    Permission is hereby granted, free of charge, to any person obtaining a
    copy of this software and associated documentation files (the "Software"),
@@ -26,15 +26,31 @@
 */
 
 #include <stdio.h>
-#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+
+#if defined (_WIN32)                                    /* Windows */
+
+#include <winsock2.h>
+
+#elif !defined (__OS2__) || defined (__EMX__)           /* VMS, Mac, Unix, OS/2 EMX */
+
+#include <unistd.h>
 #include <netdb.h>
-#include <sys/types.h> 
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+
+#define closesocket     close
+#define SOCKET          int
+#define INVALID_SOCKET  ((SOCKET)-1)
+#if !defined(SOCKET_ERROR)
+#define SOCKET_ERROR    (-1)
+#endif
+
+#endif
 
 #define BUFSIZE         1024
 
@@ -202,8 +218,8 @@
                         p[(w)+3] = ((x) >> 24) & 0xFF
 
 typedef struct {
-    int readfd;                                         /* read socket */
-    int writefd;                                        /* write socket */
+    SOCKET readfd;                                      /* read socket */
+    SOCKET writefd;                                     /* write socket */
     int high_ip;                                        /* local host has higher ip */
     int fca_owed;                                       /* flow control ack owed */
     int init_window;
@@ -220,7 +236,16 @@ typedef struct {
  */
 void error(char *msg)
 {
+#if defined (_WIN32)
+	char *err_msg;
+	FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		NULL, WSAGetLastError(),
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		(LPSTR)&err_msg, 0, NULL);
+	fprintf(stderr, "%s: %s", msg, err_msg);
+#else
     perror(msg);
+#endif
     exit(1);
 }
 
@@ -269,7 +294,7 @@ void send_capabilities(PEER_t *peer, unsigned char *buf)
     buf[off++] = 0x03;                                  /* TCP Connections */
     buf[off++] = CAP_TCP;
     buf[off++] = 0x01;
-    
+
     PUT16(buf, LEN_CTRL, htons(off - LEN_CTRL));
     PUT16(buf, LEN_CTRL + 2, htons(0x1520));
 
@@ -280,9 +305,9 @@ void send_capabilities(PEER_t *peer, unsigned char *buf)
     buf[HDR_PID] = 0x42;
     buf[HDR_NUM] = 0x01;
     buf[HDR_DIR] = DIR_TGT;
-    
-    n = write(peer->writefd, buf, off);
-    if (n < 0)
+
+    n = send(peer->writefd, buf, off, 0);
+    if (n == SOCKET_ERROR)
         error("ERROR writing to socket");
     printf("--> CAP_EXCHANGE\r\n");
 }
@@ -387,15 +412,15 @@ void process_capabilities(PEER_t *peer, unsigned char *buf)
     PUT16(buf, msg_off, htons(0x0004));                 /* GDS Length */
     PUT16(buf, msg_off + 2, htons(0x1521));             /* GDS ID = Capabilities Response */
 
-    n = write(peer->writefd, buf, msg_off + 4);         /* send response */
-    if (n < 0)
+    n = send(peer->writefd, buf, msg_off + 4, 0);       /* send response */
+    if (n == SOCKET_ERROR)
         error("ERROR writing to socket");
     printf("--> CAP_EXCHANGE(r)\r\n");
 
     if (close_read)
     {
         printf("Closing read socket\r\n");
-        close(peer->readfd);
+        closesocket(peer->readfd);
         peer->readfd = peer->writefd;
     }
     else if (close_write)
@@ -525,8 +550,8 @@ void process_packet(PEER_t *peer, unsigned char *buf)
             buf[HDR_DIR] = DIR_ORG;
             PUT32(buf, HDR_RDLC, GET32(buf, HDR_ODLC));
             PUT32(buf, HDR_RDPID, GET32(buf, HDR_ODPID));
-            n = write(peer->writefd, buf, LEN_CTRL);
-            if (n < 0)
+            n = send(peer->writefd, buf, LEN_CTRL, 0);
+            if (n == SOCKET_ERROR)
                 error("ERROR writing to socket");
             if (buf[HDR_SFLG] & SSPex)
                 printf("--> ICANREACH(ex)\r\n");
@@ -541,8 +566,8 @@ void process_packet(PEER_t *peer, unsigned char *buf)
             PUT16(buf, HDR_MLEN, 0);
             buf[HDR_MTYP] = CONTACT;
             buf[HDR_DIR] = DIR_ORG;
-            n = write(peer->writefd, buf, LEN_CTRL);
-            if (n < 0)
+            n = send(peer->writefd, buf, LEN_CTRL, 0);
+            if (n == SOCKET_ERROR)
                 error("ERROR writing to socket");
             printf("--> CONTACT\r\n");
 #endif
@@ -556,8 +581,8 @@ void process_packet(PEER_t *peer, unsigned char *buf)
                 buf[HDR_DIR] = DIR_ORG;
                 PUT32(buf, HDR_RDLC, GET32(buf, HDR_ODLC));
                 PUT32(buf, HDR_RDPID, GET32(buf, HDR_ODPID));
-                n = write(peer->writefd, buf, LEN_CTRL+msg_len);
-                if (n < 0)
+                n = send(peer->writefd, buf, LEN_CTRL+msg_len, 0);
+                if (n == SOCKET_ERROR)
                     error("ERROR writing to socket");
                 printf("--> CONTACT\r\n");
             }
@@ -587,8 +612,8 @@ void process_packet(PEER_t *peer, unsigned char *buf)
                 buf[LEN_CTRL+17] = 0;
                 buf[LEN_CTRL+18] = 0;
                 buf[LEN_CTRL+19] = 0;
-                n = write(peer->writefd, buf, LEN_CTRL+20);
-                if (n < 0)
+                n = send(peer->writefd, buf, LEN_CTRL+20, 0);
+                if (n == SOCKET_ERROR)
                     error("ERROR writing to socket");
                 printf("--> XIDFRAME\r\n");
             }
@@ -601,8 +626,8 @@ void process_packet(PEER_t *peer, unsigned char *buf)
             buf[HDR_DIR] = DIR_ORG;
             PUT32(buf, HDR_RDLC, GET32(buf, HDR_ODLC));
             PUT32(buf, HDR_RDPID, GET32(buf, HDR_ODPID));
-            n = write(peer->writefd, buf, LEN_CTRL);
-            if (n < 0)
+            n = send(peer->writefd, buf, LEN_CTRL, 0);
+            if (n == SOCKET_ERROR)
                 error("ERROR writing to socket");
             printf("--> CONTACTED\r\n");
             break;
@@ -637,8 +662,8 @@ void process_packet(PEER_t *peer, unsigned char *buf)
             buf[LEN_INFO+15] = 0x56;
             buf[LEN_INFO+16] = 0x78;
             buf[LEN_INFO+17] = 0x9A;
-            n = write(peer->writefd, buf, LEN_INFO+18);
-            if (n < 0)
+            n = send(peer->writefd, buf, LEN_INFO+18, 0);
+            if (n == SOCKET_ERROR)
                 error("ERROR writing to socket");
             printf("--> ACTPU\r\n");
             break;
@@ -668,8 +693,8 @@ void process_packet(PEER_t *peer, unsigned char *buf)
                 buf[LEN_INFO+9] = 0x0D;                     /* ACTLU */
                 buf[LEN_INFO+10] = 0x01;                    /* cold activation */
                 buf[LEN_INFO+11] = 0x01;                    /* FM, TS profile */
-                n = write(peer->writefd, buf, LEN_INFO+12);
-                if (n < 0)
+                n = send(peer->writefd, buf, LEN_INFO+12, 0);
+                if (n == SOCKET_ERROR)
                     error("ERROR writing to socket");
                 printf("--> ACTLU\r\n");
             }
@@ -679,19 +704,17 @@ void process_packet(PEER_t *peer, unsigned char *buf)
             printf("<-- CAP_EXCHANGE\r\n");
             process_capabilities(peer, buf);
             break;
-        
+
     }
 }
 
 int main(int argc, char **argv)
 {
-    int serverfd;                                       /* server socket */
+    SOCKET serverfd;                                    /* server socket */
     int clientlen;                                      /* byte size of client's address */
     int serverlen;                                      /* byte size of server's address */
-    struct sockaddr_in peeraddr;                        /* peer's addr */
     struct sockaddr_in serveraddr;                      /* server's addr */
     struct sockaddr_in clientaddr;                      /* client addr */
-    struct hostent *hostp;                              /* client host info */
     unsigned char buf[BUFSIZE];                         /* message buffer */
     char *hostaddrp;                                    /* dotted decimal host addr string */
     int optval;                                         /* flag value for setsockopt */
@@ -700,26 +723,37 @@ int main(int argc, char **argv)
     unsigned int read_size;
     PEER_t peer;
 
-    /* 
-     * socket: create the parent socket 
+#if defined (_WIN32)
+	int err;
+	WORD wVersionRequested;
+	WSADATA wsaData;
+	wVersionRequested = MAKEWORD(2, 2);
+
+	err = WSAStartup(wVersionRequested, &wsaData);      /* start Winsock */
+	if (err != 0)
+		error("Winsock startup error");
+#endif
+
+    /*
+     * socket: create the parent socket
      */
     serverfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverfd < 0) 
+    if (serverfd == INVALID_SOCKET)
         error("ERROR opening socket");
 
-    /* setsockopt: Handy debugging trick that lets 
-     * us rerun the server immediately after we kill it; 
-     * otherwise we have to wait about 20 secs. 
-     * Eliminates "ERROR on binding: Address already in use" error. 
+    /* setsockopt: Handy debugging trick that lets
+     * us rerun the server immediately after we kill it;
+     * otherwise we have to wait about 20 secs.
+     * Eliminates "ERROR on binding: Address already in use" error.
      */
     optval = 1;
-    setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, 
+    setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR,
 	       (const void *)&optval , sizeof(int));
 
     /*
      * build the server's Internet address
      */
-    bzero((char *) &serveraddr, sizeof(serveraddr));
+    memset((void *) &serveraddr, 0, sizeof(serveraddr));
 
     /* this is an Internet address */
     serveraddr.sin_family = AF_INET;
@@ -730,29 +764,29 @@ int main(int argc, char **argv)
     /* this is the port we will listen on */
     serveraddr.sin_port = htons((unsigned short)DLSW_PORT);
 
-    /* 
-     * bind: associate the parent socket with a port 
+    /*
+     * bind: associate the parent socket with a port
      */
-    if (bind(serverfd, (struct sockaddr *) &serveraddr, 
-	     sizeof(serveraddr)) < 0) 
+    if (bind(serverfd, (struct sockaddr *) &serveraddr,
+	     sizeof(serveraddr)) == SOCKET_ERROR)
         error("ERROR on binding");
 
-    /* 
-     * listen: make this socket ready to accept connection requests 
+    /*
+     * listen: make this socket ready to accept connection requests
      */
-    if (listen(serverfd, 1) < 0)
+    if (listen(serverfd, 1) == SOCKET_ERROR)
         error("ERROR on listen");
 
-    /* 
-     * accept: wait for a connection request 
+    /*
+     * accept: wait for a connection request
      */
     clientlen = sizeof(clientaddr);
     peer.readfd = accept(serverfd, (struct sockaddr *) &clientaddr, &clientlen);
-    if (peer.readfd < 0) 
+	if (peer.readfd == INVALID_SOCKET)
         error("ERROR on accept");
-    
-    /* 
-     * determine who sent the message 
+
+    /*
+     * determine who sent the message
      */
     hostaddrp = inet_ntoa(clientaddr.sin_addr);
     if (hostaddrp == NULL)
@@ -783,7 +817,7 @@ int main(int argc, char **argv)
 
     /* connect to the server */
     peer.writefd = socket(AF_INET, SOCK_STREAM, 0);
-    if (peer.writefd < 0) 
+    if (peer.writefd == INVALID_SOCKET)
         error("ERROR opening socket");
 
     serveraddr.sin_family = AF_INET;
@@ -791,13 +825,13 @@ int main(int argc, char **argv)
     serveraddr.sin_port = htons((unsigned short)DLSW_PORT);
 
     /* connect: create a connection with the server */
-    if (connect(peer.writefd, (struct sockaddr *) &serveraddr, sizeof(serveraddr)) < 0) 
+    if (connect(peer.writefd, (struct sockaddr *) &serveraddr, sizeof(serveraddr)) == SOCKET_ERROR)
         error("ERROR connecting");
 
-    /* 
+    /*
      * send capabilities to the server
      */
-    bzero(buf, BUFSIZE);
+    memset((void *)buf, 0, BUFSIZE);
     send_capabilities(&peer, buf);
 
     while (1)
@@ -807,8 +841,8 @@ int main(int argc, char **argv)
         /*
          * read the common header fields
          */
-        n = read(peer.readfd, buf, LEN_INFO);
-        if (n < 0) 
+        n = recv(peer.readfd, buf, LEN_INFO, 0);
+        if (n == SOCKET_ERROR)
             error("ERROR reading from socket");
         read_size += n;
 
@@ -823,8 +857,8 @@ int main(int argc, char **argv)
             /*
             * read remainder of packet
             */
-            n = read(peer.readfd, &buf[LEN_INFO], rem);
-            if (n < 0) 
+            n = recv(peer.readfd, &buf[LEN_INFO], rem, 0);
+            if (n == SOCKET_ERROR)
                 error("ERROR reading from socket");
             read_size += n;
         }
@@ -837,5 +871,5 @@ int main(int argc, char **argv)
         process_packet(&peer, buf);
     }
 
-    close(peer.readfd);
+    closesocket(peer.readfd);
 }
